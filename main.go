@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strings"
 
 	fsnotify "gopkg.in/fsnotify.v1"
 )
@@ -49,17 +50,41 @@ func build(entry string) ([]string, error) {
 	return l, nil
 }
 
-func run() error {
+// func run() error {
+// 	cmd := exec.Command("./main")
+// 	cmd.Stdout = os.Stdout
+// 	cmd.Stderr = os.Stderr
+// 	err := cmd.Start()
+// 	if err != nil {
+// 		return err
+// 	}
+// 	proc = cmd.Process
+// 	log.Printf("main process is running (pid: %d)\n", proc.Pid)
+// 	return nil
+// }
+
+func run() (chan interface{}, error) {
 	cmd := exec.Command("./main")
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	err := cmd.Start()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	proc = cmd.Process
+	procStatChan := make(chan interface{})
+	go func() {
+		_, err := proc.Wait()
+		if err != nil {
+			log.Println(strings.Repeat("=", 60))
+			log.Printf("exit error:(%s)", err.Error())
+			log.Println(strings.Repeat("=", 60))
+		}
+		log.Println("main process has exited")
+		close(procStatChan)
+	}()
 	log.Printf("main process is running (pid: %d)\n", proc.Pid)
-	return nil
+	return procStatChan, nil
 }
 
 func listSubDir(root string) ([]string, error) {
@@ -146,7 +171,51 @@ func kill() error {
 	return nil
 }
 
-func loop(entry string, recursive bool, watcher *fsnotify.Watcher, stopChan chan interface{}) {
+// func loop(entry string, recursive bool, watcher *fsnotify.Watcher, stopChan chan interface{}) {
+// 	for {
+// 		select {
+// 		case err := <-watcher.Errors:
+// 			panic(err)
+// 		case event := <-watcher.Events:
+// 			if event.Op&(fsnotify.Create|fsnotify.Remove|fsnotify.Write) > 0 {
+// 				log.Println("detected source file change")
+// 				err := kill()
+// 				if err != nil {
+// 					log.Println(err)
+// 					return
+// 				}
+// 				deps, err := build(entry)
+// 				if err != nil {
+// 					log.Println(err)
+// 					continue
+// 				}
+// 				if err := watcher.Close(); err != nil {
+// 					log.Println(err)
+// 					return
+// 				}
+// 				watcher, err = newWatcher(deps, recursive)
+// 				if err != nil {
+// 					log.Println(err)
+// 					return
+// 				}
+// 				if err := run(); err != nil {
+// 					log.Println(err)
+// 					continue
+// 				}
+// 			}
+// 		case <-stopChan:
+// 			err := kill()
+// 			if err != nil {
+// 				log.Println(err)
+// 			}
+// 			watcher.Close()
+// 			log.Println("closed")
+// 			return
+// 		}
+// 	}
+// }
+
+func loop(entry string, recursive bool, watcher *fsnotify.Watcher, procChan chan interface{}, stopChan chan interface{}) {
 	for {
 		select {
 		case err := <-watcher.Errors:
@@ -159,6 +228,7 @@ func loop(entry string, recursive bool, watcher *fsnotify.Watcher, stopChan chan
 					log.Println(err)
 					return
 				}
+				<-procChan
 				deps, err := build(entry)
 				if err != nil {
 					log.Println(err)
@@ -173,11 +243,20 @@ func loop(entry string, recursive bool, watcher *fsnotify.Watcher, stopChan chan
 					log.Println(err)
 					return
 				}
-				if err := run(); err != nil {
+				if newProcChan, err := run(); err != nil {
 					log.Println(err)
 					continue
+				} else {
+					procChan = newProcChan
 				}
 			}
+		case <-procChan:
+			newProcChan, err := run()
+			if err != nil {
+				log.Println(err)
+				continue
+			}
+			procChan = newProcChan
 		case <-stopChan:
 			err := kill()
 			if err != nil {
@@ -189,6 +268,29 @@ func loop(entry string, recursive bool, watcher *fsnotify.Watcher, stopChan chan
 		}
 	}
 }
+
+// func main() {
+// 	var recursive bool
+// 	var entry string
+// 	flag.BoolVar(&recursive, "r", true, "recursive watch")
+// 	flag.StringVar(&entry, "e", "main.go", "specific the main entry")
+// 	flag.Parse()
+// 	deps, err := build(entry)
+// 	if err != nil {
+// 		panic(err)
+// 	}
+// 	watcher, err := newWatcher(deps, recursive)
+// 	if err != nil {
+// 		panic(err)
+// 	}
+// 	err = run()
+// 	if err != nil {
+// 		panic(err)
+// 	}
+// 	stopChan := make(chan interface{})
+// 	go handleInterrupt(stopChan)
+// 	loop(entry, recursive, watcher, stopChan)
+// }
 
 func main() {
 	var recursive bool
@@ -204,11 +306,11 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	err = run()
+	procChan, err := run()
 	if err != nil {
 		panic(err)
 	}
 	stopChan := make(chan interface{})
 	go handleInterrupt(stopChan)
-	loop(entry, recursive, watcher, stopChan)
+	loop(entry, recursive, watcher, procChan, stopChan)
 }

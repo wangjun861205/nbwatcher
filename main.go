@@ -74,6 +74,10 @@ func run() (chan interface{}, error) {
 	proc = cmd.Process
 	procStatChan := make(chan interface{})
 	go func() {
+		defer func() {
+			recover()
+			close(procStatChan)
+		}()
 		_, err := proc.Wait()
 		if err != nil {
 			log.Println(strings.Repeat("=", 60))
@@ -81,7 +85,6 @@ func run() (chan interface{}, error) {
 			log.Println(strings.Repeat("=", 60))
 		}
 		log.Println("main process has exited")
-		close(procStatChan)
 	}()
 	log.Printf("main process is running (pid: %d)\n", proc.Pid)
 	return procStatChan, nil
